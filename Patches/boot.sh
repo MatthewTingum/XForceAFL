@@ -1,0 +1,2 @@
+xbox-softmmu/qemu-system-xbox -cpu pentium3 -machine xbox,short_animation,bootrom=mcpx.bin -m 64 -drive file=/home/user/Documents/XForceAFL/qemu_mode/qemu/state.qcow2,index=0,media=disk,locked=on -drive index=1,media=cdrom,file=/home/user/Documents/XForceAFL/qemu_mode/qemu/nothing.iso -bios /home/user/Documents/XForceAFL/qemu_mode/qemu/complex_4627debug.bin -usb -device usb-hub,bus=usb-bus.0,port=3 -device usb-xbox-gamepad,bus=usb-bus.0,port=3.2
+

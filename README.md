@@ -1,6 +1,6 @@
 
 ### Editor Note
-I'm in the process of getting everything cleaned up. Code coming soon.
+Everything you should need to get going is here. Driver example coming as soon as I can dig it up. You should be able to build a driver from the notes / code review.
 
 # XForceAFL
 A kernel fuzzer for the original Xbox
@@ -19,12 +19,10 @@ If you would like a more in depth understanding of how this works, I'd recommend
 
 ## Setup
 ```
-git clone https://github.com/MatthewTingum/XForceAFL.git
-cd XForceAFL-master
-make
-cd ./qemu_mode/qemu
-make
+sh setup.sh
 ```
+
+Copy over the usual XQEMU files (HDD, BIOS, MCPX)
 
 You will need to compile a client-side driver. In addition, you will need some seed inputs. Check out the `example` directory.
 

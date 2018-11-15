@@ -1,0 +1,512 @@
+--- translate.c	2018-11-14 22:16:03.040386000 -0600
++++ translate.c.x	2018-07-24 21:33:15.582509000 -0500
+@@ -27,6 +27,7 @@
+ #include "cpu.h"
+ #include "disas/disas.h"
+ #include "tcg-op.h"
++#include "exec/cpu_ldst.h"
+ 
+ #include "helper.h"
+ #define GEN_HELPER 1
+@@ -123,6 +124,7 @@
+     int cpuid_7_0_ebx_features;
+ } DisasContext;
+ 
++static void gen_aflBBlock(target_ulong pc);
+ static void gen_eob(DisasContext *s);
+ static void gen_jmp(DisasContext *s, target_ulong eip);
+ static void gen_jmp_tb(DisasContext *s, target_ulong eip, int tb_num);
+@@ -7269,6 +7271,7 @@
+         }
+         break;
+     case 0xcc: /* int3 */
++        printf("!!!!!!! int3 !!!!!!\n");
+         gen_interrupt(s, EXCP03_INT3, pc_start - s->cs_base, s->pc - s->cs_base);
+         break;
+     case 0xcd: /* int N */
+@@ -7479,6 +7482,9 @@
+             gen_eob(s);
+         }
+         break;
++    case 0x124: /* pseudo-instr: 0x0f 0x24 - AFL call */
++        gen_helper_aflCall(cpu_regs[R_EAX], cpu_env, cpu_regs[R_EDI], cpu_regs[R_ESI], cpu_regs[R_EDX]);
++        break;
+ #ifdef TARGET_X86_64
+     case 0x105: /* syscall */
+         /* XXX: is it usable in real mode ? */
+@@ -8377,6 +8383,7 @@
+     gen_opc_end = tcg_ctx.gen_opc_buf + OPC_MAX_SIZE;
+ 
+     dc->is_jmp = DISAS_NEXT;
++    gen_aflBBlock(pc_start);
+     pc_ptr = pc_start;
+     lj = -1;
+     num_insns = 0;
+@@ -8507,3 +8514,467 @@
+     if (cc_op != CC_OP_DYNAMIC)
+         env->cc_op = cc_op;
+ }
++
++
++
++
++
++
++#include "afl.h"
++//#include "afl-qemu-cpu-inl.h"
++
++extern target_ulong afl_entry_point, afl_start_code, afl_end_code, tfl_dead_point, tfl_restore_point;
++
++// This is a little hack since we don't have an elfload.c to take advantage of
++static target_ulong configForkserver(CPUArchState *env, target_ulong entryPoint, target_ulong endCode){
++    afl_entry_point = (target_ulong)entryPoint;
++    //printf("Tracing Entry point: %d\n", entryPoint);
++    afl_start_code = (target_ulong)0;
++    afl_end_code = (target_ulong)0xFFFFFFFF;
++    return 0;
++}
++
++static target_ulong startForkserver(CPUArchState *env, target_ulong enableTicks)
++{
++    printf("startForkserver Called\n");
++
++    //printf("pid %d: startForkServer\n", getpid()); fflush(stdout);
++    if(afl_fork_child) {
++
++        printf("Fork server already running\n");
++
++        /* 
++         * we've already started a fork server. perhaps a test case
++         * accidentally triggered startForkserver again.  Exit the
++         * test case without error.
++         */
++        exit(0);
++    }
++#ifdef CONFIG_USER_ONLY
++    /* we're running in the main thread, get right to it! */
++
++    printf("We're in the main thread, prep the forkserver\n");
++
++    afl_setup();
++
++    afl_forkserver(env);
++#else
++    /*
++     * we're running in a cpu thread. we'll exit the cpu thread
++     * and notify the iothread.  The iothread will run the forkserver
++     * and in the child will restart the cpu thread which will continue
++     * execution.
++     * N.B. We assume a single cpu here!
++     */
++
++    printf("We're running in a cpu thread\n");
++
++    aflEnableTicks = enableTicks;
++    afl_wants_cpu_to_stop = 1;
++#endif
++    return 0;
++}
++
++/* copy work into ptr[0..sz].  Assumes memory range is locked. */
++static target_ulong getWork(CPUArchState *env, target_ulong ptr, target_ulong sz)
++{
++    target_ulong retsz;
++    FILE *fp;
++    unsigned char ch;
++
++    //printf("pid %d: getWork %lx %lx\n", getpid(), ptr, sz);fflush(stdout);
++    //assert(aflStart == 0);
++    printf("attempting to open file: %s", aflFile);
++    fp = fopen(aflFile, "rb");
++    if(!fp) {
++         perror(aflFile);
++         return -1;
++    }
++    retsz = 0;
++    while(retsz < sz) {
++        if(fread(&ch, 1, 1, fp) == 0)
++            break;
++        cpu_stb_data(env, ptr, ch);
++        retsz ++;
++        ptr ++;
++    }
++    fclose(fp);
++    return retsz;
++}
++
++static target_ulong startWork(CPUArchState *env, target_ulong ptr)
++{
++    target_ulong start, end;
++
++    //printf("pid %d: ptr %lx\n", getpid(), ptr);fflush(stdout);
++    start = cpu_ldq_data(env, ptr);
++    end = cpu_ldq_data(env, ptr + sizeof start);
++    //printf("pid %d: startWork %lx - %lx\n", getpid(), start, end);fflush(stdout);
++
++    afl_start_code = start;
++    afl_end_code   = end;
++    aflGotLog = 0;
++    aflStart = 1;
++    return 0;
++}
++
++static target_ulong doneWork(target_ulong val)
++{
++    //printf("pid %d: doneWork %lx\n", getpid(), val);fflush(stdout);
++    //assert(aflStart == 1);	// Let's just shittly assume that everything is okay Lundeen style
++/* detecting logging as crashes hasnt been helpful and
++   has occasionally been a problem.  We'll leave it to
++   a post-analysis phase to look over dmesg output for
++   our corpus.
++ */
++#ifdef LETSNOT 
++    if(aflGotLog)
++        exit(64 | val);
++#endif
++    exit(val); /* exit forkserver child */
++}
++
++
++static target_ulong setDeadRestore(CPUArchState *env, target_ulong dead, target_ulong restore)
++{
++    tfl_dead_point = dead;
++    tfl_restore_point = restore;
++    printf("Dead Point set to: %llx\n", tfl_dead_point);
++    printf("Restore Point set to: %llx\n", tfl_restore_point);
++    return 0;
++}
++
++static target_ulong setQemuReady(CPUArchState *env)
++{
++
++    aflGotLog = 0;
++    aflStart = 1;
++
++    afl_start_code = (target_ulong)0x0;
++    afl_end_code   = (target_ulong)0xffffffff;
++
++    qemu_ready(env);
++    return 0;
++}
++
++static target_ulong setEndRun(CPUArchState *env)
++{
++    afl_endTrace(env);
++    return 0;
++}
++
++static target_ulong doCollectTranslations(CPUArchState *env)
++{
++    /* Collect translation requests until setEndRun is hit */
++    return 0;
++}
++
++target_ulong helper_aflCall(CPUArchState *env, target_ulong code, target_ulong a0, target_ulong a1) {
++    printf("Making a hypercall...\n");
++    switch(code) {
++    case 1: return startForkserver(env, a0);
++    case 2: return getWork(env, a0, a1);
++    case 3: return startWork(env, a0);
++    case 4: return doneWork(a0);
++    case 5: return configForkserver(env, a0, a1);
++    case 6: return setDeadRestore(env, a0, a1);	// This is where the fun begins
++    case 7: return setQemuReady(env);
++    case 8: return setEndRun(env);
++    case 9: return doCollectTranslations(env);	
++    default: return -1;
++    }
++}
++
++/* return pointer to static buf filled with strz from ptr[0..maxlen] */
++static const char *
++peekStrZ(CPUArchState *env, target_ulong ptr, int maxlen)
++{
++    static char buf[0x1000];
++    int i;
++    if(maxlen > sizeof buf - 1)
++        maxlen = sizeof buf - 1;
++    for(i = 0; i < maxlen; i++) {
++        char ch = cpu_ldub_data(env, ptr + i);
++        if(!ch)
++            break;
++        buf[i] = ch;
++    }
++    buf[i] = 0;
++    return buf;
++}
++
++void helper_aflInterceptLog(CPUArchState *env)
++{
++    if(!aflStart)
++        return;
++    aflGotLog = 1;
++
++    static FILE *fp = NULL;
++    if(fp == NULL) {
++        fp = fopen("logstore.txt", "a");
++        if(fp) {
++            struct timeval tv;
++            gettimeofday(&tv, NULL);
++            fprintf(fp, "\n----\npid %d time %ld.%06ld\n", getpid(), (u_long)tv.tv_sec, (u_long)tv.tv_usec);
++        }
++    }
++    if(!fp) 
++        return;
++
++    target_ulong stack = env->regs[R_ESP];
++    //target_ulong level = env->regs[R_ESI]; // arg 2
++    target_ulong ptext = cpu_ldq_data(env, stack + 0x8); // arg7
++    target_ulong len   = cpu_ldq_data(env, stack + 0x10) & 0xffff; // arg8
++    const char *msg = peekStrZ(env, ptext, len);
++    fprintf(fp, "%s\n", msg);
++}
++
++void helper_aflInterceptPanic(void)
++{
++    if(!aflStart)
++        return;
++    //printf("Panic causing exit\n");
++    exit(32);
++}
++
++static void gen_aflBBlock(target_ulong pc)
++{
++    //printf("Testing for panic address: %d\n", aflPanicAddr);
++    //printf("Current PC: %llx\n", pc);
++    // Dump trace out to file
++
++    
++    FILE *traceFile;
++    traceFile = fopen("./traceFile.txt", "a");
++
++	switch(pc) {
++
++		case (target_ulong)0x80040b93  :
++			fprintf(traceFile, "AvSetDisplayMode: %llx\n", pc);
++			break;
++		
++		case (target_ulong)0x8004035a  :
++			fprintf(traceFile, "AvSendTVEncoderOption: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8004fe14  :
++			fprintf(traceFile, "AvSetSavedDataAddress: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8004fe0e  :
++			fprintf(traceFile, "AvGetSavedDataAddress: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8003f12e  :
++			fprintf(traceFile, "XeLoadTitleImage: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8003f0c9  :
++			fprintf(traceFile, "XeLoadDashboardImageWithReason: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8003ea30  :
++			fprintf(traceFile, "XeLoadImage: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8003e45a  :
++			fprintf(traceFile, "XepLoadSection: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x80030c46  :
++			fprintf(traceFile, "_DebugPrint: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8002ff5c  :
++			fprintf(traceFile, "RtlInitAnsiString: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8002f2e1  :
++			fprintf(traceFile, "RtlRip: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8002f243  :
++			fprintf(traceFile, "RtlAssert: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8002e6af  :
++			fprintf(traceFile, "DbgUnLoadImageSymbols: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8002e66d  :
++			fprintf(traceFile, "DbgLoadImageSymbols: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8002e62e  :
++			fprintf(traceFile, "DbgPrompt: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8002e5d4  :
++			fprintf(traceFile, "DbgPrint: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8002e5cc  :
++			fprintf(traceFile, "DbgBreakPointWithStatus: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8002e56d  :
++			fprintf(traceFile, "PsInitSystem: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8002e408  :
++			fprintf(traceFile, "PsTerminateSystemThread: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8002d241  :
++			fprintf(traceFile, "NtQuerySymbolicLinkObject: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8002d228  :
++			fprintf(traceFile, "NtOpenSymbolicLinkObject: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8002ca8b  :
++			fprintf(traceFile, "NtClose: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8002a537  :
++			fprintf(traceFile, "NtAllocateVirtualMemory: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x80029256  :
++			fprintf(traceFile, "MmAllocateContiguousMemory: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x80026f37  :
++			fprintf(traceFile, "Message: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x80026796  :
++			fprintf(traceFile, "KiInitializeKernel: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x80024a04  :
++			fprintf(traceFile, "KeQuickRebootSystem: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8002452b  :
++			fprintf(traceFile, "KeRestoreFloatingPointState: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x800254a  :
++			fprintf(traceFile, "KeBugCheck: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x80022461  :
++			fprintf(traceFile, "KeBugCheckEx: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x80020196  :
++			fprintf(traceFile, "NtWriteFile: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8001f0a8  :
++			fprintf(traceFile, "NtCreateFile: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8001eaf9  :
++			fprintf(traceFile, "IofCompleteRequest: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8001e169  :
++			fprintf(traceFile, "IoFreeIrp: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8001e065  :
++			fprintf(traceFile, "IoDeleteSymbolicLink: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8001dbc8  :
++			fprintf(traceFile, "IofCallDriver: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8001d99c  :
++			fprintf(traceFile, "Phase1Initialization: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8001d79c  :
++			fprintf(traceFile, "ExpInitializeExecutive: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8001d295  :
++			fprintf(traceFile, "HalReturnToFirmware: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8001d1e8  :
++			fprintf(traceFile, "HalHaltSystem: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8001cc9f  :
++			fprintf(traceFile, "HalReadSMCTrayState: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8001abf3  :
++			fprintf(traceFile, "ExAllocatePool: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8001a679  :
++			fprintf(traceFile, "ExFreePool: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8001a15c  :
++			fprintf(traceFile, "ExAllocatePoolWithTag: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x80019b08  :
++			fprintf(traceFile, "ExAcquireReadWriteLockShared: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x80019ae4  :
++			fprintf(traceFile, "ExAcquireReadWriteLockExclusive: %llx\n", pc);
++			break;
++
++		case (target_ulong)0x8003cfc5  :
++			fprintf(traceFile, "snprintf: %llx\n", pc);
++			break;
++
++		default :
++			if (pc > (target_ulong)0x8003ea30 && pc <= (target_ulong)0x8003ef94){
++				fprintf(traceFile, "Inside XeLoadImage: %llx\n", pc);
++				break;
++			}
++
++			if (pc > (target_ulong)0x8003f12e && pc <= (target_ulong)0x8003f309){
++				fprintf(traceFile, "Inside XeLoadTitleImage: %llx\n", pc);
++				break;
++			}
++
++			fprintf(traceFile, "Current PC: %llx\n", pc);
++
++	}
++
++    fclose(traceFile);
++    
++    
++    //printf("Target PC: %llx\n", aflPanicAddr);
++
++    if(pc == (target_ulong)0x8003f0c9){
++	// We've reached XeLoadDashboardImageWithReason, exit to prevent a hang
++	//printf("Exiting from a return to dashboard\n");
++	//exit(0);
++    }
++
++    // We finished XeLoadImage in XeLoadTitleImage - We can bail out here to speed things up (8003f20a)
++    // TODO: Can't be killing the initial load!!
++    if(pc == (target_ulong)0x8003f20a){
++	// We've reached XeLoadDashboardImageWithReason, exit to prevent a hang
++	//printf("Finished XeLoadImage -- Bailing out before the kernel tells us to fuck off\n");
++	//exit(0);
++    }
++    
++    if(pc == aflPanicAddr)
++	//printf("Found the panic address\n"); -- Brackets!
++        gen_helper_aflInterceptPanic();
++    if(pc == aflDmesgAddr)
++        gen_helper_aflInterceptLog(cpu_env);
++}
++

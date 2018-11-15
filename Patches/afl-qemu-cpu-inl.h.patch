@@ -1,0 +1,242 @@
+--- afl-qemu-cpu-inl.h	2018-07-08 00:08:07.037776000 -0500
++++ afl-qemu-cpu-inl.h.x	2018-11-14 22:16:59.530624549 -0600
+@@ -48,14 +48,21 @@
+    regular instrumentation injected via afl-as.h. */
+ 
+ #define AFL_QEMU_CPU_SNIPPET2(env, pc) do { \
+-    if(pc == afl_entry_point && pc && getenv("AFLGETWORK") == 0) { \
++    if(pc == afl_entry_point && pc) { \
+       afl_setup(); \
+-      afl_forkserver(env); \
+       aflStart = 1; \
+     } \
+     afl_maybe_log(pc); \
+   } while (0)
+ 
++// When we hit the 
++#define TFL_QEMU_CPU_SNIPPET1(env) do { \
++    if (tfl_dead_point && tfl_restore_point && env->eip == tfl_dead_point){ \
++    printf("Jumping to restore point\n"); \
++    env->eip = tfl_restore_point; \
++    } \
++  } while (0)
++
+ /* We use one additional file descriptor to relay "needs translation"
+    messages between the child and the fork server. */
+ 
+@@ -69,7 +76,9 @@
+ 
+ target_ulong afl_entry_point = 0, /* ELF entry point (_start) */
+           afl_start_code = 0,  /* .text start pointer      */
+-          afl_end_code = 0;    /* .text end pointer        */
++          afl_end_code = 0,    /* .text end pointer        */
++          tfl_dead_point = 0,  /* If this address gets hit, we reload the driver - eg. a `non vulnerable crash` or the end of our test */
++	  tfl_restore_point = 0;	/* Address to jump to if we hit the tfl_dead_point */
+ 
+ int aflStart = 0;               /* we've started fuzzing */
+ int aflEnableTicks = 0;         /* re-enable ticks for each test */
+@@ -168,10 +177,77 @@
+     return n;
+ }
+ 
+-/* Fork server logic, invoked once we hit _start. */
++// ## -- TFL hack
++/* Start Trace logic, invoked once we make startTrace hypercall. */
++void afl_startTrace(CPUArchState *env) {
+ 
+-void afl_forkserver(CPUArchState *env) {
++    /* Collect translation requests until the stop trace translation block is hit. */
++    // This should happen in a separate thread
++
++    //afl_wait_tsl(env, t_fd[0]);
++
++}
++
++// ## -- TFL hack
++/* End Trace logic, invoked once we make endTrace hypercall. */
++void afl_endTrace(CPUArchState *env) {
++
++	// Write to afl pipe and inform that we finished clean
++	static unsigned char tmp[4];
++
++	while (write(FORKSRV_FD + 1, tmp, 4) != 4) {
++		printf("Waiting to write pipe\n");
++	}
++		printf("Wrote pipe!\n");
++
++	/*
++	if (write(FORKSRV_FD + 1, tmp, 4) != 4){
++		printf("XQEMU reported status to AFL\n");
++	} else {
++		printf("XQEMU is sad\n");
++	}
++	*/
++
++}
++
++// ## -- TFL hack
++/* invoked once we make qemuReady hypercall. */
++void qemu_ready(CPUArchState *env) {
++
++	printf("TFL: qemu_ready called\n");
++
++	static unsigned char tmp[4];
++	//if (!afl_area_ptr) return;
++
++	printf("TFL: afl_area_ptr\n");
++
++	// Tell afl that the `forkserver` is up and ready, this can be hacked out later
++	if (write(FORKSRV_FD + 1, tmp, 4) != 4) return;
++
++	printf("TFL: AFL informed of forkserver\n");
++
++	int status, t_fd[2];
++
++	/* Whoops, parent dead? */
++
++	//if (uninterrupted_read(FORKSRV_FD, tmp, 4) != 4) exit(2);
+ 
++	printf("TFL: parent alive\n");
++
++	/* Establish a channel with child to grab translation commands. We'll 
++	read from t_fd[0], child will write to TSL_FD. */
++
++	//if (pipe(t_fd) || dup2(t_fd[1], TSL_FD) < 0) exit(3);
++
++	printf("TFL: Translation channel alive\n");
++
++	//close(t_fd[1]);
++
++}
++
++/* Fork server logic, invoked once we hit _start. */
++void afl_forkserver(CPUArchState *env) {
++	printf("afl_forkserver\n");
+   static unsigned char tmp[4];
+ 
+   if (!afl_area_ptr) return;
+@@ -219,6 +295,7 @@
+ 
+     close(TSL_FD);
+ 
++    // Inform afl of the child pid (successful fork)
+     if (write(FORKSRV_FD + 1, &child_pid, 4) != 4) exit(5);
+ 
+     /* Collect translation requests until child dies and closes the pipe. */
+@@ -227,6 +304,24 @@
+ 
+     /* Get and relay exit status to parent. */
+ 
++    /*
++    FILE* childLog = fopen("./logChildPid.txt", "w");
++    fprintf(childLog, "PID: %d\n", child_pid);
++    fclose(childLog);
++    */
++
++    /* This is an old hack
++    while (waitpid(child_pid, &status, 0) < 0){
++        // This takes a long time check if we can ever get past it
++    }
++    */
++
++    /*
++    FILE* successLog = fopen("./logSuccess.txt", "w");
++    fprintf(successLog, "Made it - PID: %d\n", child_pid);
++    fclose(successLog);
++    */
++
+     if (waitpid(child_pid, &status, 0) < 0) exit(6);
+     if (write(FORKSRV_FD + 1, &status, 4) != 4) exit(7);
+ 
+@@ -242,9 +337,14 @@
+   /* Optimize for cur_loc > afl_end_code, which is the most likely case on
+      Linux systems. */
+ 
++  //printf("Tracing From: %llx\n", afl_start_code);
++  //printf("Tracing To: %llx\n", afl_end_code);
++
+   if (cur_loc > afl_end_code || cur_loc < afl_start_code || !afl_area_ptr)
+     return 0;
+ 
++  //printf("A thing happened\n");
++
+ #ifdef DEBUG_EDGES
+   if(1) {
+     printf("exec %lx\n", cur_loc);
+@@ -257,19 +357,11 @@
+      the value to get something quasi-uniform. */
+ 
+   target_ulong h = cur_loc;
+-#if TARGET_LONG_BITS == 32
+-  h ^= cur_loc >> 16;
+-  h *= 0x85ebca6b;
+-  h ^= h >> 13;
+-  h *= 0xc2b2ae35;
+-  h ^= h >> 16;
+-#else
+   h ^= cur_loc >> 33;
+   h *= 0xff51afd7ed558ccd;
+   h ^= h >> 33;
+   h *= 0xc4ceb9fe1a85ec53;
+   h ^= h >> 33;
+-#endif
+ 
+   h &= MAP_SIZE - 1;
+ 
+@@ -341,7 +433,6 @@
+         without having it's guest's kernel page the data in !  
+         so we will only JIT kernel code segment which shouldnt page.
+         */
+-        // XXX this monstrosity must go!
+         if(t.pc >= 0xffffffff81000000 && t.pc <= 0xffffffff81ffffff) {
+             //printf("wait_tsl %lx -- jit\n", t.pc); fflush(stdout);
+             tb_find_slow(env, t.pc, t.cs_base, t.flags);
+@@ -359,3 +450,48 @@
+ 
+ }
+ 
++
++
++
++// ## TFL HACK
++/* This is the other side of the same channel. Since timeouts are handled by
++   afl-fuzz simply killing the child, we can just wait until the pipe breaks. */
++
++static void tfl_wait_tsl(CPUArchState *env, int fd) {
++
++  struct afl_tsl t;
++
++  while (1) {
++
++    /* Broken pipe means it's time to return to the fork server routine. */
++
++    if (read(fd, &t, sizeof(struct afl_tsl)) != sizeof(struct afl_tsl))
++      break;
++
++    if(0 && env) {
++#ifdef CONFIG_USER_ONLY
++        tb_find_slow(env, t.pc, t.cs_base, t.flags);
++#else
++        /* if the child system emulator pages in new code and then JITs it, 
++        and sends its address to the server, the server cannot also JIT it 
++        without having it's guest's kernel page the data in !  
++        so we will only JIT kernel code segment which shouldnt page.
++        */
++        if(t.pc >= 0xffffffff81000000 && t.pc <= 0xffffffff81ffffff) {
++            //printf("wait_tsl %lx -- jit\n", t.pc); fflush(stdout);
++            tb_find_slow(env, t.pc, t.cs_base, t.flags);
++        } else {
++            //printf("wait_tsl %lx -- ignore nonkernel\n", t.pc); fflush(stdout);
++        }
++#endif
++    } else {
++        //printf("wait_tsl %lx -- ignore\n", t.pc); fflush(stdout);
++    }
++
++  }
++
++  close(fd);
++
++}
++
++

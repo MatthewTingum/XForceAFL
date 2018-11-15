@@ -1,0 +1,11 @@
+--- ac97.c	2018-11-14 22:16:02.924399000 -0600
++++ ac97.c.x	2018-07-19 18:30:47.821395000 -0500
+@@ -147,7 +147,7 @@
+ };
+ 
+ #ifdef DEBUG_AC97
+-#define dolog(...) AUD_log ("ac97", __VA_ARGS__)
++#define dolog(...)
+ #else
+ #define dolog(...)
+ #endif

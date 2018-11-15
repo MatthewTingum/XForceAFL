@@ -1,0 +1,26 @@
+--- acpi_xbox.c	2018-11-14 22:16:02.968394000 -0600
++++ acpi_xbox.c.x	2018-07-19 18:24:39.151153000 -0500
+@@ -57,14 +57,14 @@
+     default:
+         break;
+     }
+-    XBOX_DPRINTF("pm gpio read [0x%llx] -> 0x%llx\n", addr, r);
++    //XBOX_DPRINTF("pm gpio read [0x%llx] -> 0x%llx\n", addr, r);
+     return r;
+ }
+ 
+ static void xbox_pm_gpio_write(void *opaque, hwaddr addr, uint64_t val,
+                                unsigned width)
+ {
+-    XBOX_DPRINTF("pm gpio write [0x%llx] = 0x%llx\n", addr, val);
++    //XBOX_DPRINTF("pm gpio write [0x%llx] = 0x%llx\n", addr, val);
+ }
+ 
+ static const MemoryRegionOps xbox_pm_gpio_ops = {
+@@ -115,4 +115,4 @@
+     memory_region_add_subregion(&pm->io, XBOX_PM_GPIO_BASE, &pm->io_gpio);
+ 
+     pm->irq = sci_irq;
+-}
+\ No newline at end of file
++}

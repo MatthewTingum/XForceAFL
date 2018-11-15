@@ -1,0 +1,11 @@
+--- dsp.c	2018-11-14 22:16:02.968394000 -0600
++++ dsp.c.x	2018-07-19 18:29:09.709824000 -0500
+@@ -57,7 +57,7 @@
+ 
+ DSPState* dsp_init(void* scratch_rw_opaque, dsp_scratch_rw_func scratch_rw)
+ {
+-    DPRINTF("dsp_init\n");
++    //DPRINTF("dsp_init\n");
+ 
+     DSPState* dsp = (DSPState*)malloc(sizeof(DSPState));
+     memset(dsp, 0, sizeof(*dsp));

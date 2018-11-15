@@ -1,0 +1,27 @@
+Brb. Gotta dig through my VM's. You'll need an XDK or something that can compile an XBE for you. Then use the hypercalls to start tracing, grab the fuzzy buffer, and stop tracing. You'll probably just want to set your trace zone to the entire kernel. It resides somewhere in the higher addresses... Can't remember exactly where off the top of my head.
+
+Something like:
+
+
+void hypercall(int hypercallNum, int arg0, int arg1){
+
+	__asm
+	{
+		mov edi, [ebp + 8];
+		mov esi, [ebp + 12];
+		mov edx, [ebp + 16];
+		_emit(0x0F);
+		_emit(0x24);
+	}
+
+	return;
+
+}
+
+Then you can use the psuedo-hypercalls as follows:
+
+	(hypercallNums)
+	1 - Start Forkserver(ticksEnabled, 0)
+	2 - GetWork(ptrToBuffer, len)
+	3 - StartWork(startTrace, endTrace)
+	4 - EndWork(0, 0)

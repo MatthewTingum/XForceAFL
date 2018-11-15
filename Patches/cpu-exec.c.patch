@@ -1,0 +1,79 @@
+--- cpu-exec.c	2018-11-14 22:16:02.904401000 -0600
++++ cpu-exec.c.x	2018-07-24 20:20:08.678123000 -0500
+@@ -22,6 +22,7 @@
+ #include "tcg.h"
+ #include "qemu/atomic.h"
+ #include "sysemu/qtest.h"
++#include "afl-qemu-cpu-inl.h"
+ 
+ #if defined(_WIN64)
+ /* Temporary hack for win64 because the include order is broken.
+@@ -60,6 +61,7 @@
+ static inline tcg_target_ulong cpu_tb_exec(CPUState *cpu, uint8_t *tb_ptr)
+ {
+     CPUArchState *env = cpu->env_ptr;
++    target_ulong pc = env->eip;
+     uintptr_t next_tb = tcg_qemu_tb_exec(env, tb_ptr);
+     if ((next_tb & TB_EXIT_MASK) > TB_EXIT_IDX1) {
+         /* We didn't start executing this TB (eg because the instruction
+@@ -74,6 +76,8 @@
+             assert(cc->set_pc);
+             cc->set_pc(cpu, tb->pc);
+         }
++    } else {
++        AFL_QEMU_CPU_SNIPPET2(env, pc);
+     }
+     if ((next_tb & TB_EXIT_MASK) == TB_EXIT_REQUESTED) {
+         /* We were asked to stop executing TBs (probably a pending
+@@ -81,6 +85,8 @@
+          */
+         cpu->tcg_exit_req = 0;
+     }
++    if(afl_wants_cpu_to_stop)
++        cpu->exit_request = 1;
+     return next_tb;
+ }
+ 
+@@ -150,6 +156,8 @@
+  not_found:
+    /* if no translated code available, then translate it now */
+     tb = tb_gen_code(env, pc, cs_base, flags, 0);
++    
++    AFL_QEMU_CPU_SNIPPET1;
+ 
+  found:
+     /* Move the last found TB to the head of the list */
+@@ -603,6 +611,10 @@
+                 }
+ #endif /* DEBUG_DISAS */
+                 spin_lock(&tcg_ctx.tb_ctx.tb_lock);
++
++		// ### TFL HACK
++		TFL_QEMU_CPU_SNIPPET1(env);
++
+                 tb = tb_find_fast(env);
+                 /* Note: we do it here to avoid a gcc bug on Mac OS X when
+                    doing it in tb_find_slow */
+@@ -613,10 +625,14 @@
+                     next_tb = 0;
+                     tcg_ctx.tb_ctx.tb_invalidated_flag = 0;
+                 }
++
++		//AFL_QEMU_CPU_SNIPPET2;
++
+                 if (qemu_loglevel_mask(CPU_LOG_EXEC)) {
+                     qemu_log("Trace %p [" TARGET_FMT_lx "] %s\n",
+                              tb->tc_ptr, tb->pc, lookup_symbol(tb->pc));
+                 }
++#ifdef NOP_NOT_NEVER
+                 /* see if we can patch the calling TB. When the TB
+                    spans two pages, we cannot safely do a direct
+                    jump. */
+@@ -624,6 +640,7 @@
+                     tb_add_jump((TranslationBlock *)(next_tb & ~TB_EXIT_MASK),
+                                 next_tb & TB_EXIT_MASK, tb);
+                 }
++#endif
+                 spin_unlock(&tcg_ctx.tb_ctx.tb_lock);
+ 
+                 /* cpu_interrupt might be called while translating the

@@ -1,0 +1,22 @@
+--- config.h	2018-11-14 23:49:22.574484000 -0600
++++ config.h.x	2018-07-22 14:26:37.266146000 -0500
+@@ -36,7 +36,7 @@
+ 
+ /* Default timeout for fuzzed code (milliseconds): */
+ 
+-#define EXEC_TIMEOUT        1000
++#define EXEC_TIMEOUT        30000
+ 
+ /* Timeout rounding factor when auto-scaling (milliseconds): */
+ 
+@@ -57,8 +57,8 @@
+ /* Number of calibration cycles per every new test case (and for test
+    cases that show variable behavior): */
+ 
+-#define CAL_CYCLES          10
+-#define CAL_CYCLES_LONG     40
++#define CAL_CYCLES          2
++#define CAL_CYCLES_LONG     2
+ 
+ /* The same, but when AFL_NO_VAR_CHECK is set in the environment: */
+ 
