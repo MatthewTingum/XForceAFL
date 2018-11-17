@@ -1,7 +1,11 @@
 git clone https://github.com/nccgroup/TriforceAFL.git
 cd TriforceAFL
+git checkout 2a8ed329233a921044c903222fc3aa029ef68c69
 cd qemu_mode
 git clone https://github.com/espes/xqemu.git
+cd xqemu
+git checkout b5fcebf4750992cfd2628cbb645706ca8c1e55bd
+cd ../
 cp ./qemu/afl-qemu-cpu-inl.h ./xqemu/afl-qemu-cpu-inl.h
 cp ./qemu/afl.h ./xqemu/afl.h
 cp ../../Patches/qemu-options.hx ./xqemu/qemu-options.hx
