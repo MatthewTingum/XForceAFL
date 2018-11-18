@@ -1,8 +1,9 @@
-Brb. Gotta dig through my VM's. You'll need an XDK or something that can compile an XBE for you. Then use the hypercalls to start tracing, grab the fuzzy buffer, and stop tracing. You'll probably just want to set your trace zone to the entire kernel. It resides somewhere in the higher addresses... Can't remember exactly where off the top of my head.
+Compile the driver with NXDK: https://github.com/XboxDev/nxdk
 
-Something like:
+As is, the driver does almost nothing. You need to set up your own target.
 
-
+This bit is a convenience function to make psuedo-hypercalls to qemu:
+```
 void hypercall(int hypercallNum, int arg0, int arg1){
 
 	__asm
@@ -17,6 +18,7 @@ void hypercall(int hypercallNum, int arg0, int arg1){
 	return;
 
 }
+```
 
 Then you can use the psuedo-hypercalls as follows:
 
